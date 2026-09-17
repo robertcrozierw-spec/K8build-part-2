@@ -7,6 +7,7 @@ We will implement a DNS within our cluster to assist with Service to Service com
 
 CoreDNS is the standard used across multiple cluster types.
 
+### First lets confirm we can communicate across pods via IP
 After creating my-nginx we exec into the pod, I will try to ping and curl the ip of my-nginx1
 
 '''
@@ -57,7 +58,7 @@ Lets add a route using this command and try again
 '''
 ip route add 10.200.0.0/24 via 192.168.105.6
 '''
-This commands with redirect anything on the 10.200.0.0 range(subnet used by node-0) via the 192.168.105.6(node-1)
+This commands will redirect anything for the 10.200.0.0 range(subnet used by node-0) via the 192.168.105.6(node-1)
 
 Running the ping again
 '''
@@ -78,7 +79,7 @@ root@server:~# ip route add 10.200.0.0/24 via 192.168.105.6
 root@server:~# ip route add 10.200.1.0/24 via 192.168.105.7
 '''
 
-Now finally when we exec into out nginx pod and run the curl on our pod running on node-1
+Now finally when we exec into our nginx pod we can successfully curl our nginx pod running on node-1
 '''
 root@my-nginx:/# curl 10.200.1.59:80
 <!DOCTYPE html>
