@@ -25,7 +25,7 @@ I can see 2 possible reasons here:
 1. The my-nginx1 is not exposed via a service
 2. The my-nginx1 IP is not routable as it is on another node
 
-1. Is incorrect, as we are trying to connect directly to via the IP, as long as the port is exposed in the initial yaml we
+#### 1. Is incorrect, as we are trying to connect directly to via the IP, as long as the port is exposed in the initial yaml we
 should be ok.
 I can confirm this via a curl command from a pod running on the same node
 ```
@@ -47,7 +47,7 @@ Further configuration is required for the web server, reverse proxy,
 API gateway, load balancer, content cache, or other features.</p>
 ```
 
-2. This is the more likely as checking we are unable to ping any pods running on opposite clusters
+#### 2. This is the more likely as checking we are unable to ping any pods running on opposite clusters
 ```
 root@node-1:~# ping 10.200.0.78 
 PING 10.200.0.78 (10.200.0.78) 56(84) bytes of data.
