@@ -1,7 +1,10 @@
 # K8build-part-2
 Follow up project to build out existing K8s the hard way cluster adding additional features.
+-DNS server
+-Loadbalancer
+-IngressController
 
-## CoreDNS
+## DNS Server
 
 We will implement a DNS within our cluster to assist with Service to Service communication.
 
@@ -14,9 +17,10 @@ Lets take a look at an example as that may better describe it.
 We have created a clusterip service to expose an existing nginx pod internally to a linux container within our cluster. 
 
 The test pod and service configurations:
-nginx.yaml (our web server we will try to contact)
-netutils.yaml (this is a test pod that contains basic network tools)
-nginx-clusterip-service.yaml
+
+- nginx.yaml (our web server we will try to contact)
+- netutils.yaml (this is a test pod that contains basic network tools)
+- nginx-clusterip-service.yaml
 
 Once we apply our nginx-clusterip-service we can see that it has an ip configured
 
@@ -63,9 +67,9 @@ netutils:/# curl nginx-clusterip-service:80
 curl: (6) Could not resolve host: nginx-clusterip-service (Could not contact DNS servers)
 ```
 
-This is the our issue, we have no way of communicating with the cluster-ip via DNS and therefore its nginx endpoint. This is problem as when we start to configure larger deployments:
+This is our issue, we have no way of communicating with the cluster-ip via DNS and therefore its nginx endpoint. This is problem as when we start to configure larger deployments:
 - We would need to know the IP of the service, this is impractical as it assigns the IP at runtime fo the service. Making it more complex to reference the service in the same deployment file.
-- DHCP leases exist meaning the IPs will change, meaning we need to manually update our configuration.
+- DHCP leases exist meaning the IPs will change and require updating the configuration.
 
 Implementing a DNS system should resolve this making for a cleaner environment, more readable and easier to maintain.
 
@@ -94,12 +98,78 @@ We added the range to the kube-apiserver.service file on the Control Server
 root@server:~# cat /etc/systemd/system/kube-apiserver.service
   --service-cluster-ip-range=10.32.0.0/24 \
 
+However after doing this we noticed that main ip of kubernetes cluster IP service remained the same and on a different range
+```
+NAME                      TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)        AGE
+kubernetes                ClusterIP   10.0.0.1     <none>        443/TCP        22d
+```
+
+This is a problem as this Cluster IP needs to to be on the same range as our services. It turns out changing this IP is a non-trivial task. So instead we will work around it.
+
+Instead of changing the range to match our existing configuration, we will change it to match the kubernetes Cluster IP above
+
+So we should now see this:
+```
+root@server:~# cat /etc/systemd/system/kube-apiserver.service | grep service-cluster-ip-range
+  --service-cluster-ip-range=10.0.0.0/24 \
+```
+
+Once this is done we reach another issue, the original certificate generated for our Kube-apiserver was generated for a different IP.
+``` 
+[WARNING] plugin/kubernetes: Kubernetes API connection failure: Get "https://10.0.0.1:443/version": x509: certificate is valid for 127.0.0.1, 10.32.0.1, not 10.0.0.1
+```
+
+Now that we are working with the kubernetes cluster IP above. We will generate a new CSR using this IP instead and then have ti signed by our CA. Once done we will replace it on our master server
+
+Within our ca.conf file we will add the correct IP
+```
+[kube-api-server_alt_names]
+IP.0  = 127.0.0.1
+IP.1  = 10.0.0.1
+DNS.0 = kubernetes
+DNS.1 = kubernetes.default
+DNS.2 = kubernetes.default.svc
+DNS.3 = kubernetes.default.svc.cluster
+DNS.4 = kubernetes.svc.cluster.local
+DNS.5 = server.kubernetes.local
+DNS.6 = api-server.kubernetes.local
+
+[kube-api-server_distinguished_name]
+CN = kubernetes
+C  = US
+ST = Washington
+L  = Seattle
+```
+
+As we are just creating one certificate we will need to manually specify the section of the ca.conf when generation the csr
+```
+openssl req -new -key "kube-api-server.key" -sha256 -config "ca.conf" -section "kube-api-server" -out "kube-api-server.csr"
+```
+
+Next we sign it with our CA certificate and private key
+
+```
+openssl x509 -req -days 3653 -in "kube-api-server.csr" -copy_extensions copyall -sha256 -CA "ca.crt" -CAkey "ca.key" -CAcreateserial -out "kube-api-server.crt"
+```
+Copy to our master server
+```
+scp kube-api-server.crt root@server:~/
+```
+
+Finally I chose to to directly copy over the existing certificate to keep thing neat
+```
+cp kube-api-server.crt /var/lib/kubernetes/kube-api-server.crt
+```
+
+Restart the systemd service so it starts using the new certificate
+```
+systemctl restart kube-apiserver
+```
+
 
 ## Configure DNS
 
 Looking online I managed to find an existing yaml file with the (mostly) configuration we need.
-
-To break it down we have 
 
 If we apply the cordns.yaml
 
@@ -128,6 +198,24 @@ font-family: Tahoma, Verdana, Arial, sans-serif; }
 <p>If you see this page, nginx is successfully installed and working.
 Further configuration is required for the web server, reverse proxy, 
 API gateway, load balancer, content cache, or other features.</p>
-````
+```
 
-We can successfully curl our my-nginx pod via its corresponding cluster-ip service
+We can successfully curl our my-nginx pod via its corresponding cluster-ip service!
+
+## Loadbalancer
+
+Much like DNS a typical cloud instance of a load balancer is already available as this is our own bare metal cluster we will need to implement one ourselves.
+
+For this the most commonly used loadbalancer seems to be MetaLB, we will implement this in layer 2 mode, as BGP mode is outside the scope of this project.
+
+### What problem are we solving
+
+When we want to access a service from outside a node one approach could be a node port, however apart from security concerns this would not allow us to use a purely external IP only an IP of one of our nodes.
+
+A load balancer resolves this, we can use a single external IP to access a service across nodes. This has the added benefit of a stable IP, and unlike a node port IP if the node changes or is removed we would not lose connectivity to the service.
+
+### Components
+
+
+### Configure
+
