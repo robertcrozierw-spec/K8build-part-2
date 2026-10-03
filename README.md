@@ -146,7 +146,7 @@ As we are just creating one certificate we will need to manually specify the sec
 openssl req -new -key "kube-api-server.key" -sha256 -config "ca.conf" -section "kube-api-server" -out "kube-api-server.csr"
 ```
 
-Next we sign it with our CA certificate and private key
+Next we sign the CSR with our CA private key
 
 ```
 openssl x509 -req -days 3653 -in "kube-api-server.csr" -copy_extensions copyall -sha256 -CA "ca.crt" -CAkey "ca.key" -CAcreateserial -out "kube-api-server.crt"
@@ -166,6 +166,10 @@ Restart the systemd service so it starts using the new certificate
 systemctl restart kube-apiserver
 ```
 
+As this certificate is also required by etcd, we also replaced it on that side too
+```
+cp /var/lib/kubernetes/kube-api-server.crt /etc/etcd/kube-api-server.crt
+```
 
 ## Configure DNS
 
@@ -210,12 +214,110 @@ For this the most commonly used loadbalancer seems to be MetaLB, we will impleme
 
 ### What problem are we solving
 
-When we want to access a service from outside a node one approach could be a node port, however apart from security concerns this would not allow us to use a purely external IP only an IP of one of our nodes.
+When we want to access a service from outside a node one approach could be a node port, however apart from security concerns this would not allow us to use a purely external IP only an IP of one of our nodes. 
 
-A load balancer resolves this, we can use a single external IP to access a service across nodes. This has the added benefit of a stable IP, and unlike a node port IP if the node changes or is removed we would not lose connectivity to the service.
+A load balancer resolves this, we can use a single external IP to access a service across nodes, this IP will be also be unique for each service making it more practical if running multiple service. We have also the added benefit of a stable IP, and unlike a node port IP if the node changes or is removed we would not lose connectivity to the service.
 
 ### Components
 
+Main components
 
-### Configure
+### Installation and Configuration
+
+We decided to go with the native mode as the documentation advises it is more suitable for L2 mode
+```
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.16.1/config/manifests/metallb-native.yaml
+```
+
+Once deployed we can view the the running components within the newly created metallb-system namespace:
+
+```
+NAME                              READY   STATUS    RESTARTS   AGE
+pod/controller-64bccf9875-5rkbx   1/1     Running   0          24m
+pod/speaker-5ppx6                 1/1     Running   0          24m
+pod/speaker-98phc                 1/1     Running   0          24m
+
+NAME                              TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+service/metallb-webhook-service   ClusterIP   10.0.0.205   <none>        443/TCP   24m
+
+NAME                     DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+daemonset.apps/speaker   2         2         2       2            2           kubernetes.io/os=linux   24m
+
+NAME                         READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/controller   1/1     1            1           24m
+
+NAME                                    DESIRED   CURRENT   READY   AGE
+replicaset.apps/controller-64bccf9875   1         1         1       24m
+```
+
+Next we need to configure the pool that our loadbalancer can take IPs from to configure an externalIP for the service.
+
+This is done in the IPAddressPool.yaml
+
+However we received an error related to the webhook service:
+``` 
+root@lima-jumpbox:~/k8build-part-2/metallb# kubectl apply -f IPAddressPool.yaml
+Error from server (InternalError): error when creating "IPAddressPool.yaml": Internal error occurred: failed calling webhook "ipaddresspoolvalidationwebhook.metallb.io": failed to call webhook: Post "https://metallb-webhook-service.metallb-system.svc:443/validate-metallb-io-v1beta1-ipaddresspool?timeout=10s": context deadline exceeded
+```
+
+As a test I ran a curl command to the metallb-webhook-service
+```
+curl -vk --max-time 5 https://10.0.0.205:443/
+```
+
+Testing successfully on both of my nodes but interestingly it does not work from the control plane server
+```
+*   Trying 10.0.0.205:443...
+* Connection timed out after 5002 milliseconds
+* Closing connection 0
+curl: (28) Connection timed out after 5002 milliseconds
+```
+
+After some research it turns out that typically we would have kube-proxy running on the control plane server. This would give the server access to the service ip range. Up until now this access was not needed, however calling webhooks withing the cluster does in fact need it.
+Our resolution could be to configure kube-proxy on our control plane server, this would probably be the case in production systems.
+Alternatively we will manually add the route from our control plane server to one of our nodes. As this is project for learning, this solution is acceptable.
+
+To add the route server to node-o
+```
+ip route add 10.0.0.0/24 via 192.168.105.6
+````
+Rerun the curl
+```
+root@server:~# curl -vk --max-time 5 https://10.0.0.205:443/
+*   Trying 10.0.0.205:443...
+* Connected to 10.0.0.205 (10.0.0.205) port 443 (#0)
+```
+
+lets re run the ipaddresspool configuration
+´´´
+root@lima-jumpbox:~/k8build-part-2/metallb# kubectl apply -f IPAddressPool.yaml
+ipaddresspool.metallb.io/first-pool created
+```
+
+Next we can run the L2Advertisement.yaml as per the documentation
+```
+root@lima-jumpbox:~/k8build-part-2/metallb# kubectl apply -f L2Advertisement.yaml
+l2advertisement.metallb.io/example created
+```
+
+### Testing
+
+Using the nginxlb.yaml to create an nginx server to target and the loadbalancerService.yaml to create the loadbalancer service.
+
+We can can see the loadbalancer service has now been configured, and has an external IP within the range of the IPpool we configured in the IPAddressPool.yaml
+```
+root@lima-jumpbox:~/k8build-part-2/metallb# kubectl get -o wide service nginx-loadbalancer-service
+NAME                         TYPE           CLUSTER-IP   EXTERNAL-IP      PORT(S)        AGE     SELECTOR
+nginx-loadbalancer-service   LoadBalancer   10.0.0.237   192.168.105.50   80:30903/TCP   6h14m   app=nginx-loadbalanced
+```
+We can now speak with the nginx server we just created via the external IP
+
+```
+root@lima-jumpbox:~/k8build-part-2/metallb# curl 192.168.105.50
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+```
 
